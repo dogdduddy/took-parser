@@ -1,0 +1,15 @@
+[versions]
+kotlin = "2.0.21"
+agp = "8.7.0"
+kotlinx-datetime = "0.6.1"
+android-compileSdk = "35"
+android-minSdk = "26"
+android-targetSdk = "35"
+
+[libraries]
+kotlinx-datetime = { group = "org.jetbrains.kotlinx", name = "kotlinx-datetime", version.ref = "kotlinx-datetime" }
+kotlin-test = { group = "org.jetbrains.kotlin", name = "kotlin-test", version.ref = "kotlin" }
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
