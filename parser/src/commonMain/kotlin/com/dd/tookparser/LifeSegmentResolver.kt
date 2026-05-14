@@ -23,52 +23,53 @@ class LifeSegmentResolver(
         val today = now.toLocalDateTime(timeZone)
         val dayOfWeek = today.dayOfWeek
 
-        for (segment in LifeSegment.entries) {
-            val sortedPatterns = segment.triggerPatterns.sortedByDescending { it.length }
-            for (pattern in sortedPatterns) {
-                val index = input.indexOf(pattern)
-                if (index == -1) continue
+        val allPatterns = LifeSegment.entries
+            .flatMap { seg -> seg.triggerPatterns.map { p -> seg to p } }
+            .sortedByDescending { (_, p) -> p.length }
 
-                val resolvedTime = resolveTime(segment) ?: continue
+        for ((segment, pattern) in allPatterns) {
+            val index = input.indexOf(pattern)
+            if (index == -1) continue
 
-                val offset = TimeOffsetParser.parse(input)
-                val finalHour: Int
-                val finalMinute: Int
-                if (offset != null) {
-                    val totalMinutes = resolvedTime.hour * 60 + resolvedTime.minute + offset.offsetMinutes
-                    val adjusted = if (totalMinutes < 0) totalMinutes + 24 * 60 else totalMinutes
-                    finalHour = (adjusted / 60) % 24
-                    finalMinute = adjusted % 60
-                } else {
-                    finalHour = resolvedTime.hour
-                    finalMinute = resolvedTime.minute
-                }
+            val resolvedTime = resolveTime(segment) ?: continue
 
-                val resolvedDate: LocalDate = if (segment.activeDays.isNotEmpty() && dayOfWeek !in segment.activeDays) {
-                    findNextActiveDay(today.date, segment.activeDays)
-                } else {
-                    today.date
-                }
-
-                val scheduledAt = LocalDateTime(resolvedDate, LocalTime(finalHour, finalMinute, 0))
-                    .toInstant(timeZone)
-                    .toEpochMilliseconds()
-
-                var title = extractTitle(input, pattern, index)
-                if (offset != null) {
-                    title = TimeOffsetParser.removeOffset(title, offset.matchedText)
-                    if (title.isBlank()) title = input.trim()
-                }
-
-                return SegmentMatch(
-                    segment = segment,
-                    matchedPattern = pattern,
-                    matchRange = index until (index + pattern.length),
-                    scheduledAt = scheduledAt,
-                    title = title,
-                    isPremiumAccuracy = isPremium && segment.isPremium,
-                )
+            val offset = TimeOffsetParser.parse(input)
+            val finalHour: Int
+            val finalMinute: Int
+            if (offset != null) {
+                val totalMinutes = resolvedTime.hour * 60 + resolvedTime.minute + offset.offsetMinutes
+                val adjusted = if (totalMinutes < 0) totalMinutes + 24 * 60 else totalMinutes
+                finalHour = (adjusted / 60) % 24
+                finalMinute = adjusted % 60
+            } else {
+                finalHour = resolvedTime.hour
+                finalMinute = resolvedTime.minute
             }
+
+            val resolvedDate: LocalDate = if (segment.activeDays.isNotEmpty() && dayOfWeek !in segment.activeDays) {
+                findNextActiveDay(today.date, segment.activeDays)
+            } else {
+                today.date
+            }
+
+            val scheduledAt = LocalDateTime(resolvedDate, LocalTime(finalHour, finalMinute, 0))
+                .toInstant(timeZone)
+                .toEpochMilliseconds()
+
+            var title = extractTitle(input, pattern, index)
+            if (offset != null) {
+                title = TimeOffsetParser.removeOffset(title, offset.matchedText)
+                if (title.isBlank()) title = input.trim()
+            }
+
+            return SegmentMatch(
+                segment = segment,
+                matchedPattern = pattern,
+                matchRange = index until (index + pattern.length),
+                scheduledAt = scheduledAt,
+                title = title,
+                isPremiumAccuracy = isPremium && segment.isPremium,
+            )
         }
         return null
     }
@@ -79,11 +80,12 @@ class LifeSegmentResolver(
         }
 
     fun stripTrigger(input: String): String {
-        for (segment in LifeSegment.entries) {
-            for (pattern in segment.triggerPatterns) {
-                val index = input.indexOf(pattern)
-                if (index != -1) return extractTitle(input, pattern, index)
-            }
+        val allPatterns = LifeSegment.entries
+            .flatMap { seg -> seg.triggerPatterns.map { p -> seg to p } }
+            .sortedByDescending { (_, p) -> p.length }
+        for ((_, pattern) in allPatterns) {
+            val index = input.indexOf(pattern)
+            if (index != -1) return extractTitle(input, pattern, index)
         }
         return input
     }

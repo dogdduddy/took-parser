@@ -144,7 +144,7 @@ class TimeParser(
                 // 입력에 숫자 기반 명시적 시간이 있으면 그 시간이 우선
                 // 단, 생활 구간 키워드가 함께 있으면 구간 매칭이 우선 (오프셋 파싱을 위해)
                 val hasSegmentKeyword = segmentResolver.containsTrigger(textToParse)
-                if (EXPLICIT_NUMERIC_TIME.containsMatchIn(textToParse) && !hasSegmentKeyword) {
+                if (EXPLICIT_NUMERIC_TIME.containsMatchIn(textToParse)) {
                     val dateExtraction = extractDate(textToParse, now)
                     val timeExtraction = extractTime(textToParse, now)
                     if (timeExtraction != null) {
@@ -330,6 +330,11 @@ class TimeParser(
         timeExtraction: TimeExtraction?,
     ): LocalDateTime {
         val nowLdt = now.toLocalDateTime(timeZone)
+
+        // "X분/시간 뒤" with no explicit date: preserve full sub-minute precision
+        if (timeExtraction?.relativeInstant != null && dateExtraction == null) {
+            return timeExtraction.relativeInstant.toLocalDateTime(timeZone)
+        }
 
         val targetDate: LocalDate = when {
             dateExtraction != null -> dateExtraction.first
