@@ -3,9 +3,10 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.library)
+    id("maven-publish")
 }
 
-group = "com.github.<placeholder-user>"
+group = "com.github.dogdduddy"
 version = "0.1.0"
 
 kotlin {
