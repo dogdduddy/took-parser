@@ -162,6 +162,70 @@ class TimeParserTest {
         assertEquals(30, result.scheduledAt.toLdt().minute)
     }
 
+    // ── 컨텍스트 없는 모호한 시각 (가장 가까운 미래 룰) ─────────────────
+
+    @Test
+    fun `밤 22시 19분 기준 11시 - 오늘 23시로 해석`() {
+        val now = LocalDateTime(2026, 5, 7, 22, 19, 0).toInstant(tz)
+        val fixedParser = TimeParser({ now })
+        val result = assertIs<TimeParseResult.Scheduled>(fixedParser.parse("11시에 밥 먹어야해요"))
+        val ldt = result.scheduledAt.toLdt()
+        assertEquals(7, ldt.dayOfMonth)
+        assertEquals(23, ldt.hour)
+        assertEquals(0, ldt.minute)
+    }
+
+    @Test
+    fun `밤 23시 기준 10시 - 내일 오전 10시로 해석`() {
+        val now = LocalDateTime(2026, 5, 7, 23, 0, 0).toInstant(tz)
+        val fixedParser = TimeParser({ now })
+        val result = assertIs<TimeParseResult.Scheduled>(fixedParser.parse("10시 다이소"))
+        val ldt = result.scheduledAt.toLdt()
+        assertEquals(8, ldt.dayOfMonth)
+        assertEquals(10, ldt.hour)
+        assertEquals(0, ldt.minute)
+    }
+
+    @Test
+    fun `오후 16시 기준 3시 - 내일 15시로 해석`() {
+        val now = LocalDateTime(2026, 5, 7, 16, 0, 0).toInstant(tz)
+        val fixedParser = TimeParser({ now })
+        val result = assertIs<TimeParseResult.Scheduled>(fixedParser.parse("3시 회의"))
+        val ldt = result.scheduledAt.toLdt()
+        assertEquals(8, ldt.dayOfMonth)
+        assertEquals(15, ldt.hour)
+    }
+
+    @Test
+    fun `오후 15시 기준 9시 - 오늘 21시로 해석`() {
+        val now = LocalDateTime(2026, 5, 7, 15, 0, 0).toInstant(tz)
+        val fixedParser = TimeParser({ now })
+        val result = assertIs<TimeParseResult.Scheduled>(fixedParser.parse("9시 다이소"))
+        val ldt = result.scheduledAt.toLdt()
+        assertEquals(7, ldt.dayOfMonth)
+        assertEquals(21, ldt.hour)
+    }
+
+    @Test
+    fun `오전 8시 기준 11시 - 오늘 오전 11시로 해석`() {
+        val now = LocalDateTime(2026, 5, 7, 8, 0, 0).toInstant(tz)
+        val fixedParser = TimeParser({ now })
+        val result = assertIs<TimeParseResult.Scheduled>(fixedParser.parse("11시 회의"))
+        val ldt = result.scheduledAt.toLdt()
+        assertEquals(7, ldt.dayOfMonth)
+        assertEquals(11, ldt.hour)
+    }
+
+    @Test
+    fun `오후 14시 기준 12시 - 내일 12시로 해석`() {
+        val now = LocalDateTime(2026, 5, 7, 14, 0, 0).toInstant(tz)
+        val fixedParser = TimeParser({ now })
+        val result = assertIs<TimeParseResult.Scheduled>(fixedParser.parse("12시 점심"))
+        val ldt = result.scheduledAt.toLdt()
+        assertEquals(8, ldt.dayOfMonth)
+        assertEquals(12, ldt.hour)
+    }
+
     @Test
     fun `오늘 15시 기준 오전 9시 약은 오늘 9시로 파싱`() {
         val fixedParser = TimeParser(::fixedNow)

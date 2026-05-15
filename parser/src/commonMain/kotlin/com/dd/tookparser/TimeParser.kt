@@ -336,6 +336,15 @@ class TimeParser(
             return timeExtraction.relativeInstant.toLocalDateTime(timeZone)
         }
 
+        // AM/PM 미명시 + 날짜 미지정: "가장 가까운 미래" 룰 적용
+        if (timeExtraction != null
+            && !timeExtraction.isContextExplicit
+            && dateExtraction == null
+            && timeExtraction.relativeInstant == null
+        ) {
+            return resolveAmbiguousHour(now, timeExtraction.hour, timeExtraction.minute)
+        }
+
         val targetDate: LocalDate = when {
             dateExtraction != null -> dateExtraction.first
             timeExtraction?.relativeInstant != null -> timeExtraction.relativeInstant.toLocalDateTime(timeZone).date
@@ -343,11 +352,50 @@ class TimeParser(
         }
 
         val (hour, minute) = when {
-            timeExtraction != null -> timeExtraction.hour to timeExtraction.minute
+            timeExtraction != null -> {
+                val h = if (timeExtraction.isContextExplicit) {
+                    timeExtraction.hour
+                } else {
+                    adjustHour(timeExtraction.hour, "")
+                }
+                h to timeExtraction.minute
+            }
             else -> DEFAULT_HOUR to DEFAULT_MINUTE
         }
 
         return LocalDateTime(targetDate, LocalTime(hour, minute, 0))
+    }
+
+    /**
+     * AM/PM이 명시되지 않은 "X시" 입력을 가장 가까운 미래 시각으로 해석한다.
+     * - 1..9: PM 강선호 (오늘/내일 H+12)
+     * - 10..11: AM/PM 둘 다 후보 (오늘/내일 H, H+12)
+     * - 12: 정오만 후보 (오늘/내일 12:00)
+     */
+    private fun resolveAmbiguousHour(now: Instant, rawHour: Int, minute: Int): LocalDateTime {
+        val today = now.toLocalDateTime(timeZone).date
+        val tomorrow = today.plus(DatePeriod(days = 1))
+
+        val candidates = buildList {
+            when (rawHour) {
+                in 1..9 -> {
+                    add(LocalDateTime(today, LocalTime(rawHour + 12, minute, 0)))
+                    add(LocalDateTime(tomorrow, LocalTime(rawHour + 12, minute, 0)))
+                }
+                in 10..11 -> {
+                    add(LocalDateTime(today, LocalTime(rawHour, minute, 0)))
+                    add(LocalDateTime(today, LocalTime(rawHour + 12, minute, 0)))
+                    add(LocalDateTime(tomorrow, LocalTime(rawHour, minute, 0)))
+                    add(LocalDateTime(tomorrow, LocalTime(rawHour + 12, minute, 0)))
+                }
+                12 -> {
+                    add(LocalDateTime(today, LocalTime(12, minute, 0)))
+                    add(LocalDateTime(tomorrow, LocalTime(12, minute, 0)))
+                }
+            }
+        }.sorted()
+
+        return candidates.firstOrNull { it.toInstant(timeZone) > now } ?: candidates.last()
     }
 
     /** 날짜 표현 추출. Pair<목표LocalDate, 매치된 문자열> */
@@ -481,6 +529,10 @@ class TimeParser(
                 m.groupValues[4].isNotEmpty() -> m.groupValues[4].toInt()
                 else -> 0
             }
+            // AM/PM 컨텍스트가 없고 1..12시이면 모호 → buildResult에서 "가장 가까운 미래" 룰 적용
+            if (context.isEmpty() && hour in 1..12) {
+                return TimeExtraction(hour, minute, isContextExplicit = false)
+            }
             val adjustedHour = adjustHour(hour, context)
             return TimeExtraction(adjustedHour, minute)
         }
@@ -499,6 +551,7 @@ class TimeParser(
         val hour: Int,
         val minute: Int,
         val relativeInstant: Instant? = null,
+        val isContextExplicit: Boolean = true,
     )
 
     private fun adjustHour(hour: Int, context: String): Int {
