@@ -15,7 +15,7 @@ enum class LifeSegment(
 ) {
     WAKE_UP(
         displayName = "기상",
-        triggerPatterns = listOf("일어나서", "일어나면", "눈 뜨면", "기상 후", "기상하고"),
+        triggerPatterns = listOf("일어나서", "일어나면", "눈 뜨면", "기상 후", "기상하고", "기상"),
         isPremium = true,
         activeDays = emptySet(),
     ),
@@ -51,7 +51,7 @@ enum class LifeSegment(
     ),
     WORK_END(
         displayName = "퇴근",
-        triggerPatterns = listOf("퇴근하면서", "퇴근하면", "퇴근해서", "퇴근"),
+        triggerPatterns = listOf("퇴근하면서", "퇴근하면", "퇴근해서", "퇴근하고", "퇴근"),
         isPremium = false,
         activeDays = WEEKDAYS,
     ),
@@ -63,13 +63,13 @@ enum class LifeSegment(
     ),
     ARRIVE_HOME(
         displayName = "집 도착",
-        triggerPatterns = listOf("집 도착해서", "집 도착하면", "집에 가서", "집 가서", "퇴근하고"),
+        triggerPatterns = listOf("집 도착해서", "집 도착하면", "집에 가서", "집 가서"),
         isPremium = true,
         activeDays = WEEKDAYS,
     ),
     DINNER(
         displayName = "저녁 식사",
-        triggerPatterns = listOf("저녁 먹기 전에", "저녁밥 먹고", "저녁 먹고"),
+        triggerPatterns = listOf("저녁 먹기 전에", "저녁밥 먹고", "저녁 먹고", "저녁"),
         isPremium = true,
         activeDays = emptySet(),
     ),

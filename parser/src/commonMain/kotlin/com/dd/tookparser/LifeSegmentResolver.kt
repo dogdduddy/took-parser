@@ -14,7 +14,7 @@ import kotlinx.datetime.plus
 
 class LifeSegmentResolver(
     private val schedule: LifeSchedule,
-    private val isPremium: Boolean = false,
+    val isPremium: Boolean = false,
     private val nowProvider: NowProvider = { Clock.System.now() },
     private val timeZone: TimeZone = TimeZone.currentSystemDefault(),
 ) {
@@ -30,6 +30,20 @@ class LifeSegmentResolver(
         for ((segment, pattern) in allPatterns) {
             val index = input.indexOf(pattern)
             if (index == -1) continue
+
+            // 무료 유저가 프리미엄 세그먼트를 사용하려 할 때: 매칭은 하되 isBlocked=true
+            if (!isPremium && segment.isPremium) {
+                val title = extractTitle(input, pattern, index)
+                return SegmentMatch(
+                    segment = segment,
+                    matchedPattern = pattern,
+                    matchRange = index until (index + pattern.length),
+                    scheduledAt = 0L,
+                    title = title,
+                    isPremiumAccuracy = false,
+                    isBlocked = true,
+                )
+            }
 
             val resolvedTime = resolveTime(segment) ?: continue
 
@@ -69,6 +83,7 @@ class LifeSegmentResolver(
                 scheduledAt = scheduledAt,
                 title = title,
                 isPremiumAccuracy = isPremium && segment.isPremium,
+                isBlocked = false,
             )
         }
         return null
@@ -187,4 +202,6 @@ data class SegmentMatch(
     val scheduledAt: Long,
     val title: String,
     val isPremiumAccuracy: Boolean,
+    /** true: 매칭은 됐지만 무료 정책으로 변환이 차단됨 */
+    val isBlocked: Boolean = false,
 )

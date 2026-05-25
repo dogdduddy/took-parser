@@ -101,15 +101,17 @@ class LifeSegmentResolverTest {
     }
 
     @Test
-    fun `기본 미설정 스케줄 - 퇴근하고 밥 먹기가 무료 폴백 시각으로 파싱`() {
+    fun `기본 미설정 스케줄 - 퇴근하고 밥 먹기가 무료 퇴근 시각으로 파싱`() {
         val resolver = LifeSegmentResolver(LifeSchedule(isConfigured = false), isPremium = false)
         val result = resolver.resolve("퇴근하고 밥 먹기")
 
         assertNotNull(result)
         assertEquals("밥 먹기", result!!.title)
-        assertEquals(LifeSegment.ARRIVE_HOME, result.segment)
+        // "퇴근하고"는 WORK_END(무료)로 이동됨
+        assertEquals(LifeSegment.WORK_END, result.segment)
+        assertFalse(result.isBlocked)
         assertEquals(18, resolvedHour(result.scheduledAt))
-        assertEquals(30, resolvedMinute(result.scheduledAt))
+        assertEquals(0, resolvedMinute(result.scheduledAt))
     }
 
     @Test
@@ -120,7 +122,7 @@ class LifeSegmentResolverTest {
         val scheduled = assertIs<TimeParseResult.Scheduled>(result)
         assertEquals("밥 먹기", scheduled.title)
         assertEquals(18, resolvedHour(scheduled.scheduledAt))
-        assertEquals(30, resolvedMinute(scheduled.scheduledAt))
+        assertEquals(0, resolvedMinute(scheduled.scheduledAt))
     }
 
     @Test
@@ -136,15 +138,17 @@ class LifeSegmentResolverTest {
     }
 
     @Test
-    fun `퇴근하고 마트 - 무료퇴근+30분 폴백`() {
+    fun `퇴근하고 마트 - 무료퇴근 시각으로 자동 등록`() {
         val resolver = LifeSegmentResolver(testSchedule(), isPremium = false)
         val result = resolver.resolve("퇴근하고 마트")
 
         assertNotNull(result)
         assertEquals("마트", result!!.title)
-        assertEquals(LifeSegment.ARRIVE_HOME, result.segment)
+        // "퇴근하고"는 WORK_END(무료) — 바텀시트 없이 퇴근 시각으로 등록
+        assertEquals(LifeSegment.WORK_END, result.segment)
+        assertFalse(result.isBlocked)
         assertEquals(19, resolvedHour(result.scheduledAt))
-        assertEquals(30, resolvedMinute(result.scheduledAt))
+        assertEquals(0, resolvedMinute(result.scheduledAt))
     }
 
     @Test
@@ -174,16 +178,17 @@ class LifeSegmentResolverTest {
     // ── 프리미엄 계층 ──────────────────────────────────────────────────────
 
     @Test
-    fun `퇴근하고 운동 - 프리미엄퇴근+통근으로 정밀 계산`() {
+    fun `퇴근하고 운동 - 퇴근 시각으로 등록`() {
+        // "퇴근하고"는 WORK_END(무료)로 이동: 퇴근 시각 기준
         val resolver = LifeSegmentResolver(testSchedule(), isPremium = true)
         val result = resolver.resolve("퇴근하고 운동")
 
         assertNotNull(result)
         assertEquals("운동", result!!.title)
-        assertEquals(LifeSegment.ARRIVE_HOME, result.segment)
-        assertTrue(result.isPremiumAccuracy)
-        assertEquals(20, resolvedHour(result.scheduledAt))
-        assertEquals(15, resolvedMinute(result.scheduledAt))
+        assertEquals(LifeSegment.WORK_END, result.segment)
+        assertFalse(result.isBlocked)
+        assertEquals(19, resolvedHour(result.scheduledAt))
+        assertEquals(0, resolvedMinute(result.scheduledAt))
     }
 
     @Test
@@ -386,8 +391,9 @@ class LifeSegmentResolverTest {
 
         assertNotNull(result)
         assertEquals("마트", result!!.title)
+        // WORK_END(무료) → 퇴근 시각 19:00
         assertEquals(19, resolvedHour(result.scheduledAt))
-        assertEquals(30, resolvedMinute(result.scheduledAt))
+        assertEquals(0, resolvedMinute(result.scheduledAt))
     }
 
     @Test

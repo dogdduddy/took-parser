@@ -64,6 +64,12 @@ class TimeParser(
             "안에", "까지는", "까지", "부터는", "부터",
             "에는", "에도", "에서", "쯤에", "에", "쯤",
         )
+
+        /** 캘린더 컨텍스트를 암시하는 키워드 */
+        private val CALENDAR_TRIGGER_WORDS = listOf(
+            "끝나고", "끝나면", "끝난 후", "다녀와서", "다녀오고",
+        )
+        private val CALENDAR_TRIGGER_BEFORE = Regex("""\S+\s*(?:전에|후에)""")
     }
 
     private val recurrencePatterns: List<Pair<Regex, (MatchResult) -> RecurrenceRule>> = listOf(
@@ -130,20 +136,27 @@ class TimeParser(
         if (trimmed.isBlank()) return TimeParseResult.Buffered(trimmed)
 
         val now = nowProvider()
+        // segmentResolver가 없으면 프리미엄으로 간주 (하위 호환)
+        val isPremium = segmentResolver?.isPremium ?: true
+        val triggers = mutableSetOf<PlusFeature>()
 
         // 0단계: 반복 키워드 감지
         val recurrenceResult = detectRecurrence(trimmed)
         val textToParse = recurrenceResult?.second ?: trimmed
         val recurrenceRule = recurrenceResult?.first
 
+        // 무료 유저가 반복 기능을 사용하려 할 때 즉시 차단
+        if (recurrenceRule != null && !isPremium) {
+            triggers.add(PlusFeature.RECURRENCE)
+            return TimeParseResult.Buffered(trimmed, triggeredPlusFeatures = triggers)
+        }
+
         // 1. FALLBACK_PATTERNS 먼저 확인 (키워드 탐욕 매칭 방지)
         val fallbackMatch = FALLBACK_PATTERNS.firstNotNullOfOrNull { it.find(textToParse) }
 
         if (fallbackMatch != null) {
             if (segmentResolver != null) {
-                // 입력에 숫자 기반 명시적 시간이 있으면 그 시간이 우선
-                // 단, 생활 구간 키워드가 함께 있으면 구간 매칭이 우선 (오프셋 파싱을 위해)
-                val hasSegmentKeyword = segmentResolver.containsTrigger(textToParse)
+                // 명시적 숫자 시간이 있으면 그 시간 우선
                 if (EXPLICIT_NUMERIC_TIME.containsMatchIn(textToParse)) {
                     val dateExtraction = extractDate(textToParse, now)
                     val timeExtraction = extractTime(textToParse, now)
@@ -162,25 +175,35 @@ class TimeParser(
                                 hour = result.hour,
                                 minute = result.minute,
                             ),
+                            triggeredPlusFeatures = triggers,
                         )
                     }
                 }
                 // 명시적 시간 없음 → 생활 구간 매칭
                 val segmentMatch = segmentResolver.resolve(textToParse)
                 if (segmentMatch != null) {
-                    val segLdt = Instant.fromEpochMilliseconds(segmentMatch.scheduledAt).toLocalDateTime(timeZone)
-                    return TimeParseResult.Scheduled(
-                        title = segmentMatch.title.ifBlank { trimmed },
-                        scheduledAt = segmentMatch.scheduledAt,
-                        confidence = if (segmentMatch.isPremiumAccuracy) 0.95f else 0.8f,
-                        recurrenceRule = recurrenceRule?.copy(
-                            hour = segLdt.hour,
-                            minute = segLdt.minute,
-                        ),
-                    )
+                    if (segmentMatch.isBlocked) {
+                        triggers.add(PlusFeature.LIFESTYLE_SEGMENT)
+                        // 차단됨 → 캘린더 확인으로 fall-through
+                    } else {
+                        if (segmentMatch.segment.isPremium) triggers.add(PlusFeature.LIFESTYLE_SEGMENT)
+                        val segLdt = Instant.fromEpochMilliseconds(segmentMatch.scheduledAt)
+                            .toLocalDateTime(timeZone)
+                        return TimeParseResult.Scheduled(
+                            title = segmentMatch.title.ifBlank { trimmed },
+                            scheduledAt = segmentMatch.scheduledAt,
+                            confidence = if (segmentMatch.isPremiumAccuracy) 0.95f else 0.8f,
+                            recurrenceRule = recurrenceRule?.copy(
+                                hour = segLdt.hour,
+                                minute = segLdt.minute,
+                            ),
+                            matchedSegment = segmentMatch.segment,
+                            triggeredPlusFeatures = triggers,
+                        )
+                    }
                 }
             }
-            // 8단계: 캘린더 컨텍스트 매칭
+            // 캘린더 컨텍스트 매칭
             if (calendarResolver != null) {
                 val calMatch = calendarResolver.resolve(textToParse)
                 if (calMatch != null) {
@@ -190,108 +213,133 @@ class TimeParser(
                             scheduledAt = calMatch.scheduledAt,
                             confidence = 0.85f,
                             recurrenceRule = recurrenceRule,
+                            triggeredPlusFeatures = triggers,
                         )
                     } else {
                         TimeParseResult.BufferedWithHint(
                             title = calMatch.title.ifBlank { trimmed },
                             hint = calMatch.failReason ?: "",
+                            triggeredPlusFeatures = triggers,
                         )
                     }
                 }
             }
+            // 무료 유저 + 캘린더 트리거 단어 포함
+            if (!isPremium && containsCalendarTriggerWords(textToParse)) {
+                triggers.add(PlusFeature.CALENDAR_CONTEXT)
+            }
+            if (triggers.isNotEmpty()) {
+                return TimeParseResult.Buffered(trimmed, triggeredPlusFeatures = triggers)
+            }
             return TimeParseResult.NeedsFallback(textToParse, fallbackMatch.value)
         }
 
-        // 2. 날짜/시간 파싱
+        // ── 비-Fallback 경로 ──────────────────────────────────────────────
         val dateExtraction = extractDate(textToParse, now)
-        val timeExtraction = extractTime(textToParse, now)
+        val hasExplicitNumericTime = EXPLICIT_NUMERIC_TIME.containsMatchIn(textToParse)
 
-        if (dateExtraction != null && timeExtraction != null) {
-            // 날짜 + 시간 둘 다 있음
-            val result = buildResult(now, dateExtraction, timeExtraction)
-            val title = extractTitle(textToParse, dateExtraction.second,
-                findTimeMatchInInput(textToParse, timeExtraction.hour, timeExtraction.minute))
+        // 명시적 숫자 시간이 없을 때만 세그먼트 우선 시도
+        var resolvedSegment: SegmentMatch? = null
+        var blockedBySegment = false
+        if (segmentResolver != null && !hasExplicitNumericTime) {
+            val sm = segmentResolver.resolve(textToParse)
+            if (sm != null) {
+                if (sm.isBlocked) {
+                    triggers.add(PlusFeature.LIFESTYLE_SEGMENT)
+                    blockedBySegment = true
+                } else {
+                    if (sm.segment.isPremium) triggers.add(PlusFeature.LIFESTYLE_SEGMENT)
+                    resolvedSegment = sm
+                }
+            }
+        }
+
+        // 세그먼트가 차단됐거나 없을 때만 extractTime 사용
+        val timeExtraction = if (resolvedSegment == null && !blockedBySegment) {
+            extractTime(textToParse, now)
+        } else null
+
+        // 날짜 + 세그먼트
+        if (dateExtraction != null && resolvedSegment != null) {
+            val segLdt = Instant.fromEpochMilliseconds(resolvedSegment.scheduledAt)
+                .toLocalDateTime(timeZone)
+            val combined = LocalDateTime(
+                date = dateExtraction.first,
+                time = LocalTime(segLdt.hour, segLdt.minute, 0),
+            ).toInstant(timeZone).toEpochMilliseconds()
+            var title = extractTitle(textToParse, dateExtraction.second, null)
+            title = segmentResolver!!.stripTrigger(title)
             return TimeParseResult.Scheduled(
                 title = title.ifBlank { trimmed },
-                scheduledAt = result.toInstant(timeZone).toEpochMilliseconds(),
-                recurrenceRule = recurrenceRule?.copy(
-                    hour = result.hour,
-                    minute = result.minute,
-                ),
+                scheduledAt = combined,
+                confidence = if (resolvedSegment.isPremiumAccuracy) 0.95f else 0.8f,
+                recurrenceRule = recurrenceRule?.copy(hour = segLdt.hour, minute = segLdt.minute),
+                matchedSegment = resolvedSegment.segment,
+                triggeredPlusFeatures = triggers,
             )
         }
 
-        if (dateExtraction != null && timeExtraction == null) {
-            // 날짜만 있고 시간 없음 → 생활구간으로 시간 추출 시도
-            if (segmentResolver != null) {
-                val segmentMatch = segmentResolver.resolve(textToParse)
-                if (segmentMatch != null) {
-                    val segLdt = Instant.fromEpochMilliseconds(segmentMatch.scheduledAt).toLocalDateTime(timeZone)
-                    val combined = LocalDateTime(
-                        date = dateExtraction.first,
-                        time = LocalTime(segLdt.hour, segLdt.minute, 0),
-                    ).toInstant(timeZone).toEpochMilliseconds()
+        // 날짜 + 명시적 시간
+        if (dateExtraction != null && timeExtraction != null) {
+            val result = buildResult(now, dateExtraction, timeExtraction)
+            val title = extractTitle(
+                textToParse, dateExtraction.second,
+                findTimeMatchInInput(textToParse, timeExtraction.hour, timeExtraction.minute),
+            )
+            return TimeParseResult.Scheduled(
+                title = title.ifBlank { trimmed },
+                scheduledAt = result.toInstant(timeZone).toEpochMilliseconds(),
+                recurrenceRule = recurrenceRule?.copy(hour = result.hour, minute = result.minute),
+                triggeredPlusFeatures = triggers,
+            )
+        }
 
-                    var title = extractTitle(textToParse, dateExtraction.second, null)
-                    title = segmentResolver.stripTrigger(title)
-
-                    return TimeParseResult.Scheduled(
-                        title = title.ifBlank { trimmed },
-                        scheduledAt = combined,
-                        confidence = if (segmentMatch.isPremiumAccuracy) 0.95f else 0.8f,
-                        recurrenceRule = recurrenceRule?.copy(
-                            hour = segLdt.hour,
-                            minute = segLdt.minute,
-                        ),
-                    )
-                }
+        // 날짜만 있고 시간 없음 (세그먼트 차단됐거나 아예 없음)
+        if (dateExtraction != null && resolvedSegment == null && timeExtraction == null) {
+            if (blockedBySegment) {
+                // 날짜는 있지만 시간을 Plus 기능에서만 얻을 수 있음
+                return TimeParseResult.Buffered(trimmed, triggeredPlusFeatures = triggers)
             }
-            // 세그먼트 없으면 기본시간으로 반환
             val result = buildResult(now, dateExtraction, null)
             val title = extractTitle(textToParse, dateExtraction.second, null)
             return TimeParseResult.Scheduled(
                 title = title.ifBlank { trimmed },
                 scheduledAt = result.toInstant(timeZone).toEpochMilliseconds(),
-                recurrenceRule = recurrenceRule?.copy(
-                    hour = result.hour,
-                    minute = result.minute,
-                ),
+                recurrenceRule = recurrenceRule?.copy(hour = result.hour, minute = result.minute),
+                triggeredPlusFeatures = triggers,
             )
         }
 
+        // 세그먼트만 있음 (날짜 없음)
+        if (resolvedSegment != null) {
+            val segLdt = Instant.fromEpochMilliseconds(resolvedSegment.scheduledAt)
+                .toLocalDateTime(timeZone)
+            return TimeParseResult.Scheduled(
+                title = resolvedSegment.title.ifBlank { trimmed },
+                scheduledAt = resolvedSegment.scheduledAt,
+                confidence = if (resolvedSegment.isPremiumAccuracy) 0.95f else 0.8f,
+                recurrenceRule = recurrenceRule?.copy(hour = segLdt.hour, minute = segLdt.minute),
+                matchedSegment = resolvedSegment.segment,
+                triggeredPlusFeatures = triggers,
+            )
+        }
+
+        // 시간만 있음 (날짜 없음, 세그먼트 없음)
         if (timeExtraction != null) {
-            // 시간만 있고 날짜 없음
             val result = buildResult(now, null, timeExtraction)
-            val title = extractTitle(textToParse, null,
-                findTimeMatchInInput(textToParse, timeExtraction.hour, timeExtraction.minute))
+            val title = extractTitle(
+                textToParse, null,
+                findTimeMatchInInput(textToParse, timeExtraction.hour, timeExtraction.minute),
+            )
             return TimeParseResult.Scheduled(
                 title = title.ifBlank { trimmed },
                 scheduledAt = result.toInstant(timeZone).toEpochMilliseconds(),
-                recurrenceRule = recurrenceRule?.copy(
-                    hour = result.hour,
-                    minute = result.minute,
-                ),
+                recurrenceRule = recurrenceRule?.copy(hour = result.hour, minute = result.minute),
+                triggeredPlusFeatures = triggers,
             )
         }
 
-        // 3. 생활 구간 매칭 (FALLBACK_PATTERNS에 없는 트리거)
-        if (segmentResolver != null) {
-            val segmentMatch = segmentResolver.resolve(textToParse)
-            if (segmentMatch != null) {
-                val segLdt = Instant.fromEpochMilliseconds(segmentMatch.scheduledAt).toLocalDateTime(timeZone)
-                return TimeParseResult.Scheduled(
-                    title = segmentMatch.title.ifBlank { trimmed },
-                    scheduledAt = segmentMatch.scheduledAt,
-                    confidence = if (segmentMatch.isPremiumAccuracy) 0.95f else 0.8f,
-                    recurrenceRule = recurrenceRule?.copy(
-                        hour = segLdt.hour,
-                        minute = segLdt.minute,
-                    ),
-                )
-            }
-        }
-
-        // 8단계: 캘린더 컨텍스트 매칭 (FALLBACK_PATTERNS 외 트리거 — "전에" 등)
+        // 캘린더 컨텍스트 매칭 (FALLBACK_PATTERNS 외 트리거 — "전에" 등)
         if (calendarResolver != null) {
             val calMatch = calendarResolver.resolve(textToParse)
             if (calMatch != null) {
@@ -301,28 +349,43 @@ class TimeParser(
                         scheduledAt = calMatch.scheduledAt,
                         confidence = 0.85f,
                         recurrenceRule = recurrenceRule,
+                        triggeredPlusFeatures = triggers,
                     )
                 } else {
                     TimeParseResult.BufferedWithHint(
                         title = calMatch.title.ifBlank { trimmed },
                         hint = calMatch.failReason ?: "",
+                        triggeredPlusFeatures = triggers,
                     )
                 }
             }
         }
+        if (!isPremium && containsCalendarTriggerWords(textToParse)) {
+            triggers.add(PlusFeature.CALENDAR_CONTEXT)
+        }
 
-        // 4. 반복 키워드는 있었지만 시간 표현이 없는 경우 → 규칙의 기본 시각으로 첫 인스턴스 계산
+        // 반복 키워드는 있었지만 시간 표현이 없는 경우
+        // (isPremium=true 케이스만 여기 도달 — !isPremium은 함수 시작에서 이미 반환)
         if (recurrenceRule != null) {
             val nextOccurrence = RecurrenceCalculator.nextOccurrence(recurrenceRule, now, timeZone)
             return TimeParseResult.Scheduled(
                 title = textToParse.trim().ifBlank { trimmed },
                 scheduledAt = nextOccurrence,
                 recurrenceRule = recurrenceRule,
+                triggeredPlusFeatures = triggers,
             )
+        }
+
+        if (triggers.isNotEmpty()) {
+            return TimeParseResult.Buffered(trimmed, triggeredPlusFeatures = triggers)
         }
 
         return TimeParseResult.Buffered(trimmed)
     }
+
+    private fun containsCalendarTriggerWords(input: String): Boolean =
+        CALENDAR_TRIGGER_WORDS.any { input.contains(it) } ||
+            CALENDAR_TRIGGER_BEFORE.containsMatchIn(input)
 
     private fun buildResult(
         now: Instant,
@@ -368,9 +431,6 @@ class TimeParser(
 
     /**
      * AM/PM이 명시되지 않은 "X시" 입력을 가장 가까운 미래 시각으로 해석한다.
-     * - 1..9: PM 강선호 (오늘/내일 H+12)
-     * - 10..11: AM/PM 둘 다 후보 (오늘/내일 H, H+12)
-     * - 12: 정오만 후보 (오늘/내일 12:00)
      */
     private fun resolveAmbiguousHour(now: Instant, rawHour: Int, minute: Int): LocalDateTime {
         val today = now.toLocalDateTime(timeZone).date
@@ -435,7 +495,6 @@ class TimeParser(
         }
 
         // Priority 2.5: "이번/다음 달 D일" 또는 "D일" 단독
-        // (?!요|간|차|째) → "일요일", "5일간", "3일차", "2일째" 등 비날짜 표현 제외
         val dayOnlyPattern = Regex("""(다음\s*달|이번\s*달)?\s*(\d{1,2})일(?!요|간|차|째)""")
         dayOnlyPattern.find(input)?.let { m ->
             val prefix = m.groupValues[1].trim()
@@ -529,7 +588,6 @@ class TimeParser(
                 m.groupValues[4].isNotEmpty() -> m.groupValues[4].toInt()
                 else -> 0
             }
-            // AM/PM 컨텍스트가 없고 1..12시이면 모호 → buildResult에서 "가장 가까운 미래" 룰 적용
             if (context.isEmpty() && hour in 1..12) {
                 return TimeExtraction(hour, minute, isContextExplicit = false)
             }
