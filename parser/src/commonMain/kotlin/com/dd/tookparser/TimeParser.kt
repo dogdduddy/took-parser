@@ -70,20 +70,34 @@ class TimeParser(
             "끝나고", "끝나면", "끝난 후", "다녀와서", "다녀오고",
         )
         private val CALENDAR_TRIGGER_BEFORE = Regex("""\S+\s*(?:전에|후에)""")
+
+        private val WEEKDAY_DAYS = setOf(
+            DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY,
+            DayOfWeek.THURSDAY, DayOfWeek.FRIDAY,
+        )
+        private val WEEKEND_DAYS = setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY)
+
+        private val DAY_CHAR = Regex("[월화수목금토일]")
+
+        // "월, 화, 수" / "월·화·수" / "월요일, 화요일" — 구분자로 2개 이상
+        private val WEEKDAY_LIST_REGEX = Regex(
+            """(격주|매\s*주)?\s*""" +
+            """([월화수목금토일](?:요일)?(?:\s*(?:[,，、·・/]|와|과)\s*[월화수목금토일](?:요일)?)+)"""
+        )
+
+        // 평일 / 주말 ('주말농장'류 복합어 오탐을 lookahead로 차단)
+        private val WEEKDAY_KEYWORD_REGEX = Regex(
+            """(격주|매\s*주|매)?\s*(평일|주말)(?:마다|에\s*매번)?""" +
+            """(?=\s|$|에|까지|부터|[,.]|\d|새벽|아침|오전|점심|낮|오후|저녁|밤)"""
+        )
+
+        private const val DEFAULT_RECUR_HOUR = 9
     }
 
     private val recurrencePatterns: List<Pair<Regex, (MatchResult) -> RecurrenceRule>> = listOf(
         // "매일"
         Regex("매일") to { _ ->
             RecurrenceRule(type = RecurrenceType.DAILY, interval = 1, hour = 9, minute = 0)
-        },
-        // "주말마다", "매 주말"
-        Regex("주말마다|주말에\\s*매번|매\\s*주말") to { _ ->
-            RecurrenceRule(
-                type = RecurrenceType.WEEKLY, interval = 1,
-                daysOfWeek = setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY),
-                hour = 10, minute = 0,
-            )
         },
         // "격주 X요일"
         Regex("격주\\s*(월|화|수|목|금|토|일)\\s*요?일?") to { m ->
@@ -99,17 +113,6 @@ class TimeParser(
                 type = RecurrenceType.WEEKLY, interval = 1,
                 daysOfWeek = setOf(dayOfWeekFromName(m.groupValues[1])),
                 hour = 10, minute = 0,
-            )
-        },
-        // "평일마다", "매 평일"
-        Regex("평일마다|매\\s*평일|평일에\\s*매번") to { _ ->
-            RecurrenceRule(
-                type = RecurrenceType.WEEKLY, interval = 1,
-                daysOfWeek = setOf(
-                    DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY,
-                    DayOfWeek.THURSDAY, DayOfWeek.FRIDAY,
-                ),
-                hour = 9, minute = 0,
             )
         },
         // "매달 N일", "매월 N일"
@@ -149,6 +152,11 @@ class TimeParser(
         if (recurrenceRule != null && !isPremium) {
             triggers.add(PlusFeature.RECURRENCE)
             return TimeParseResult.Buffered(trimmed, triggeredPlusFeatures = triggers)
+        }
+
+        // 주간 반복은 nextOccurrence로 첫 알림 요일을 보장
+        if (recurrenceRule != null && recurrenceRule.type == RecurrenceType.WEEKLY) {
+            return buildWeeklyResult(textToParse, recurrenceRule, now, trimmed, triggers, segmentResolver)
         }
 
         // 1. FALLBACK_PATTERNS 먼저 확인 (키워드 탐욕 매칭 방지)
@@ -381,6 +389,35 @@ class TimeParser(
         }
 
         return TimeParseResult.Buffered(trimmed)
+    }
+
+    private fun buildWeeklyResult(
+        textToParse: String,
+        rule: RecurrenceRule,
+        now: Instant,
+        originalTrimmed: String,
+        triggers: Set<PlusFeature>,
+        segmentResolver: LifeSegmentResolver?,
+    ): TimeParseResult {
+        // 명시적 시간이 있으면 규칙 시각으로 덮어쓰고, 없으면 규칙 기본 시각 유지
+        val timeExtraction = extractTime(textToParse, now)
+        val ruleWithTime = if (timeExtraction != null) {
+            rule.copy(hour = timeExtraction.hour, minute = timeExtraction.minute)
+        } else rule
+
+        val scheduledAt = RecurrenceCalculator.nextOccurrence(ruleWithTime, now, timeZone)
+
+        val timeMatch = timeExtraction?.let { findTimeMatchInInput(textToParse, it.hour, it.minute) }
+        var title = extractTitle(textToParse, null, timeMatch)
+        if (segmentResolver != null) title = segmentResolver.stripTrigger(title)
+
+        return TimeParseResult.Scheduled(
+            title = title.ifBlank { originalTrimmed },
+            scheduledAt = scheduledAt,
+            confidence = 0.9f,
+            recurrenceRule = ruleWithTime,
+            triggeredPlusFeatures = triggers,
+        )
     }
 
     private fun containsCalendarTriggerWords(input: String): Boolean =
@@ -668,6 +705,8 @@ class TimeParser(
     }
 
     private fun detectRecurrence(input: String): Pair<RecurrenceRule, String>? {
+        detectWeekdaySet(input)?.let { return it }
+
         for ((pattern, ruleBuilder) in recurrencePatterns) {
             val match = pattern.find(input) ?: continue
             val rule = ruleBuilder(match)
@@ -676,6 +715,43 @@ class TimeParser(
         }
         return null
     }
+
+    private fun detectWeekdaySet(input: String): Pair<RecurrenceRule, String>? {
+        // 1) 평일 / 주말 키워드 우선
+        WEEKDAY_KEYWORD_REGEX.find(input)?.let { m ->
+            val interval = if (m.groupValues[1].replace(" ", "").contains("격주")) 2 else 1
+            val isWeekend = m.groupValues[2] == "주말"
+            val rule = RecurrenceRule(
+                type = RecurrenceType.WEEKLY,
+                interval = interval,
+                daysOfWeek = if (isWeekend) WEEKEND_DAYS else WEEKDAY_DAYS,
+                hour = if (isWeekend) 10 else 9,
+                minute = 0,
+            )
+            return rule to input.removeRange(m.range).trim().replace(Regex("\\s+"), " ")
+        }
+
+        // 2) 구분자로 나열된 요일 목록
+        WEEKDAY_LIST_REGEX.find(input)?.let { m ->
+            val days = extractDaysFromListSpan(m.groupValues[2])
+            if (days.size < 2) return@let
+            val interval = if (m.groupValues[1].replace(" ", "").contains("격주")) 2 else 1
+            val rule = RecurrenceRule(
+                type = RecurrenceType.WEEKLY,
+                interval = interval,
+                daysOfWeek = days,
+                hour = DEFAULT_RECUR_HOUR,
+                minute = 0,
+            )
+            return rule to input.removeRange(m.range).trim().replace(Regex("\\s+"), " ")
+        }
+        return null
+    }
+
+    private fun extractDaysFromListSpan(span: String): Set<DayOfWeek> =
+        DAY_CHAR.findAll(span.replace("요일", ""))   // '일요일'의 일→SUNDAY 오탐 방지
+            .mapNotNull { DAY_OF_WEEK_MAP[it.value] }
+            .toSet()
 }
 
 private fun dayOfWeekFromName(name: String): DayOfWeek = when (name) {
