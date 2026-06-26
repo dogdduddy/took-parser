@@ -25,6 +25,8 @@ sealed class TimeParseResult {
         val matchedSegment: LifeSegment? = null,
         /** 이 결과를 만들기 위해 사용된 Plus 기능 */
         val triggeredPlusFeatures: Set<PlusFeature> = emptySet(),
+        /** 다중 요일 입력 시 첫 일정(scheduledAt) 외 나머지 요일들 */
+        val additionalOccurrences: List<ScheduledOccurrence> = emptyList(),
     ) : TimeParseResult()
 
     /** 시간 정보 없음 — 버퍼로 저장 */
@@ -47,6 +49,12 @@ sealed class TimeParseResult {
         val triggeredPlusFeatures: Set<PlusFeature> = emptySet(),
     ) : TimeParseResult()
 }
+
+/** 다중 요일 fan-out에서 첫 일정 외 추가 발생 */
+data class ScheduledOccurrence(
+    val scheduledAt: Long,
+    val recurrenceRule: RecurrenceRule? = null,
+)
 
 /** 어느 서브타입이든 triggeredPlusFeatures를 통일 접근 */
 fun TimeParseResult.triggeredPlusFeatures(): Set<PlusFeature> = when (this) {

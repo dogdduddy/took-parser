@@ -18,6 +18,20 @@ class TimeParserRecurrenceTest {
     private val parser = TimeParser()
     private val tz = TimeZone.currentSystemDefault()
 
+    /** 첫 일정 + 추가 발생을 하나의 리스트로 */
+    private fun allOccurrences(s: TimeParseResult.Scheduled): List<ScheduledOccurrence> =
+        listOf(ScheduledOccurrence(s.scheduledAt, s.recurrenceRule)) + s.additionalOccurrences
+
+    /** 모든 발생의 실제 요일 집합 (단발/반복 무관, scheduledAt 기준) */
+    private fun occurrenceDays(s: TimeParseResult.Scheduled): Set<DayOfWeek> =
+        allOccurrences(s)
+            .map { Instant.fromEpochMilliseconds(it.scheduledAt).toLocalDateTime(tz).dayOfWeek }
+            .toSet()
+
+    /** 첫 일정의 시각(hour) */
+    private fun occurrenceHour(s: TimeParseResult.Scheduled): Int =
+        Instant.fromEpochMilliseconds(s.scheduledAt).toLocalDateTime(tz).hour
+
     @Test
     fun `매일 스트레칭 - DAILY 반복`() {
         val result = parser.parse("매일 스트레칭")
@@ -25,16 +39,6 @@ class TimeParserRecurrenceTest {
         assertEquals("스트레칭", s.title)
         assertNotNull(s.recurrenceRule)
         assertEquals(RecurrenceType.DAILY, s.recurrenceRule!!.type)
-    }
-
-    @Test
-    fun `주말마다 청소 - WEEKLY 토일`() {
-        val result = parser.parse("주말마다 청소")
-        val s = assertIs<TimeParseResult.Scheduled>(result)
-        assertEquals("청소", s.title)
-        assertNotNull(s.recurrenceRule)
-        assertEquals(RecurrenceType.WEEKLY, s.recurrenceRule!!.type)
-        assertEquals(setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY), s.recurrenceRule!!.daysOfWeek)
     }
 
     @Test
@@ -55,18 +59,6 @@ class TimeParserRecurrenceTest {
         assertNotNull(s.recurrenceRule)
         assertEquals(2, s.recurrenceRule!!.interval)
         assertEquals(setOf(DayOfWeek.WEDNESDAY), s.recurrenceRule!!.daysOfWeek)
-    }
-
-    @Test
-    fun `평일마다 출근 보고 - 월-금`() {
-        val result = parser.parse("평일마다 출근 보고")
-        val s = assertIs<TimeParseResult.Scheduled>(result)
-        assertNotNull(s.recurrenceRule)
-        assertEquals(5, s.recurrenceRule!!.daysOfWeek.size)
-        assertEquals(
-            setOf(DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY, DayOfWeek.THURSDAY, DayOfWeek.FRIDAY),
-            s.recurrenceRule!!.daysOfWeek,
-        )
     }
 
     @Test
@@ -103,76 +95,92 @@ class TimeParserRecurrenceTest {
         assertIs<TimeParseResult.Buffered>(result)
     }
 
+    // ── 다중 요일 / 평일·주말 fan-out ──────────────────────────────
+
     @Test
-    fun `여러 요일 나열 + 명시적 시간 - WEEKLY 다중 요일`() {
-        val result = parser.parse("월, 화, 수, 목, 토 오후 11시에 중고등부 톡방 링크올리기")
-        val s = assertIs<TimeParseResult.Scheduled>(result)
-        assertNotNull(s.recurrenceRule)
-        assertEquals(RecurrenceType.WEEKLY, s.recurrenceRule!!.type)
+    fun `다중 요일 단발 - 반복 키워드 없으면 첫 일정 단발`() {
+        val input = "금, 토, 일 오후 11시에 알림 테스트"
+        val s = assertIs<TimeParseResult.Scheduled>(parser.parse(input))
+        assertNull(s.recurrenceRule)
+        assertEquals(2, s.additionalOccurrences.size)
+        assertTrue(s.additionalOccurrences.all { it.recurrenceRule == null })
         assertEquals(
-            setOf(
-                DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY,
-                DayOfWeek.THURSDAY, DayOfWeek.SATURDAY,
-            ),
-            s.recurrenceRule!!.daysOfWeek,
+            setOf(DayOfWeek.FRIDAY, DayOfWeek.SATURDAY, DayOfWeek.SUNDAY),
+            occurrenceDays(s),
         )
-        assertEquals(23, s.recurrenceRule!!.hour)
-        assertEquals("중고등부 톡방 링크올리기", s.title)
+        assertEquals(23, occurrenceHour(s))
     }
 
     @Test
-    fun `요일 풀네임 나열 - 토요일 일요일`() {
-        val result = parser.parse("토요일, 일요일 청소")
-        val s = assertIs<TimeParseResult.Scheduled>(result)
-        assertNotNull(s.recurrenceRule)
-        assertEquals(setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY), s.recurrenceRule!!.daysOfWeek)
-        assertEquals("청소", s.title)
+    fun `다중 요일 반복 - 매주 키워드면 요일별 매주 반복`() {
+        val input = "매주 금, 토, 일 오후 11시에 X"
+        val s = assertIs<TimeParseResult.Scheduled>(parser.parse(input))
+        val all = allOccurrences(s)
+        assertEquals(3, all.size)
+        assertTrue(all.all { it.recurrenceRule != null })
+        assertTrue(all.all { it.recurrenceRule!!.daysOfWeek.size == 1 })
+        assertEquals(
+            setOf(DayOfWeek.FRIDAY, DayOfWeek.SATURDAY, DayOfWeek.SUNDAY),
+            all.flatMap { it.recurrenceRule!!.daysOfWeek }.toSet(),
+        )
     }
 
     @Test
-    fun `평일 키워드 + 명시적 시간 - 월-금 오전 9시`() {
-        val result = parser.parse("평일 오전 9시 약먹기")
-        val s = assertIs<TimeParseResult.Scheduled>(result)
-        assertNotNull(s.recurrenceRule)
+    fun `격주 다중 요일 - 각 규칙 interval 2`() {
+        val input = "격주 금, 토 회의"
+        val s = assertIs<TimeParseResult.Scheduled>(parser.parse(input))
+        val all = allOccurrences(s)
+        assertEquals(2, all.size)
+        assertTrue(all.all { it.recurrenceRule!!.interval == 2 })
+    }
+
+    @Test
+    fun `평일 단발 - 월-금 5개 모두 단발`() {
+        val input = "평일 오전 9시 약먹기"
+        val s = assertIs<TimeParseResult.Scheduled>(parser.parse(input))
+        val all = allOccurrences(s)
+        assertEquals(5, all.size)
+        assertTrue(all.all { it.recurrenceRule == null })
         assertEquals(
             setOf(
                 DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY,
                 DayOfWeek.THURSDAY, DayOfWeek.FRIDAY,
             ),
-            s.recurrenceRule!!.daysOfWeek,
+            occurrenceDays(s),
         )
-        assertEquals(9, s.recurrenceRule!!.hour)
+        assertEquals(9, occurrenceHour(s))
     }
 
     @Test
-    fun `주말 키워드 + 명시적 시간 - 토일 오후 3시`() {
-        val result = parser.parse("주말 오후 3시에 청소")
-        val s = assertIs<TimeParseResult.Scheduled>(result)
-        assertNotNull(s.recurrenceRule)
-        assertEquals(setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY), s.recurrenceRule!!.daysOfWeek)
-        assertEquals(15, s.recurrenceRule!!.hour)
+    fun `평일마다 반복 - 월-금 5개 모두 반복`() {
+        val input = "평일마다 약먹기"
+        val s = assertIs<TimeParseResult.Scheduled>(parser.parse(input))
+        val all = allOccurrences(s)
+        assertEquals(5, all.size)
+        assertTrue(all.all { it.recurrenceRule != null })
     }
 
     @Test
-    fun `격주 다중 요일 - interval 2 월수`() {
-        val result = parser.parse("격주 월, 수 회의")
-        val s = assertIs<TimeParseResult.Scheduled>(result)
-        assertNotNull(s.recurrenceRule)
-        assertEquals(2, s.recurrenceRule!!.interval)
-        assertEquals(setOf(DayOfWeek.MONDAY, DayOfWeek.WEDNESDAY), s.recurrenceRule!!.daysOfWeek)
+    fun `주말 단발 - 토일 2개 모두 단발`() {
+        val input = "주말 청소"
+        val s = assertIs<TimeParseResult.Scheduled>(parser.parse(input))
+        val all = allOccurrences(s)
+        assertEquals(2, all.size)
+        assertTrue(all.all { it.recurrenceRule == null })
+        assertEquals(setOf(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY), occurrenceDays(s))
     }
 
     @Test
-    fun `주간 반복 첫 알림은 지정 요일에 잡힌다`() {
-        // 2026-05-03은 일요일 — daysOfWeek에 없는 요일에 첫 알림이 잡히면 안 됨
-        val sunday = LocalDateTime(2026, 5, 3, 10, 0, 0).toInstant(tz)
-        val sundayParser = TimeParser(nowProvider = { sunday }, timeZone = tz)
-        val result = sundayParser.parse("월, 화, 수 11시")
-        val s = assertIs<TimeParseResult.Scheduled>(result)
-        assertNotNull(s.recurrenceRule)
-        val firstLdt = Instant.fromEpochMilliseconds(s.scheduledAt).toLocalDateTime(tz)
-        assertTrue(firstLdt.dayOfWeek in s.recurrenceRule!!.daysOfWeek)
-        assertEquals(DayOfWeek.MONDAY, firstLdt.dayOfWeek)
+    fun `다중 요일 정렬 - 금요일 기준 오름차순이고 첫 일정은 금요일`() {
+        // 2026-05-01은 금요일
+        val friday = LocalDateTime(2026, 5, 1, 8, 0, 0).toInstant(tz)
+        val fridayParser = TimeParser(nowProvider = { friday }, timeZone = tz)
+        val input = "금, 토, 일 11시"
+        val s = assertIs<TimeParseResult.Scheduled>(fridayParser.parse(input))
+        val times = allOccurrences(s).map { it.scheduledAt }
+        assertEquals(times.sorted(), times)
+        val firstDow = Instant.fromEpochMilliseconds(times.first()).toLocalDateTime(tz).dayOfWeek
+        assertEquals(DayOfWeek.FRIDAY, firstDow)
     }
 
     @Test

@@ -87,7 +87,7 @@ class TimeParser(
 
         // 평일 / 주말 ('주말농장'류 복합어 오탐을 lookahead로 차단)
         private val WEEKDAY_KEYWORD_REGEX = Regex(
-            """(격주|매\s*주|매)?\s*(평일|주말)(?:마다|에\s*매번)?""" +
+            """(격주|매\s*주|매)?\s*(평일|주말)(마다|에\s*매번)?""" +
             """(?=\s|$|에|까지|부터|[,.]|\d|새벽|아침|오전|점심|낮|오후|저녁|밤)"""
         )
 
@@ -142,6 +142,11 @@ class TimeParser(
         // segmentResolver가 없으면 프리미엄으로 간주 (하위 호환)
         val isPremium = segmentResolver?.isPremium ?: true
         val triggers = mutableSetOf<PlusFeature>()
+
+        // ── 다중 요일 / 평일·주말 fan-out (가장 먼저) ──
+        detectWeekdaySet(trimmed)?.let { detection ->
+            return buildWeekdayFanOut(detection, now, trimmed, segmentResolver)
+        }
 
         // 0단계: 반복 키워드 감지
         val recurrenceResult = detectRecurrence(trimmed)
@@ -417,6 +422,48 @@ class TimeParser(
             confidence = 0.9f,
             recurrenceRule = ruleWithTime,
             triggeredPlusFeatures = triggers,
+        )
+    }
+
+    private fun buildWeekdayFanOut(
+        detection: WeekdaySetDetection,
+        now: Instant,
+        originalTrimmed: String,
+        segmentResolver: LifeSegmentResolver?,
+    ): TimeParseResult {
+        val textToParse = detection.remaining
+        val timeExtraction = extractTime(textToParse, now)
+        val hour = timeExtraction?.hour ?: DEFAULT_RECUR_HOUR
+        val minute = timeExtraction?.minute ?: 0
+
+        val timeMatch = timeExtraction?.let { findTimeMatchInInput(textToParse, it.hour, it.minute) }
+        var title = extractTitle(textToParse, null, timeMatch)
+        if (segmentResolver != null) title = segmentResolver.stripTrigger(title)
+        val finalTitle = title.ifBlank { originalTrimmed }
+
+        // 요일별 다음 발생 시각 계산 → 가까운 순 정렬
+        val occurrences = detection.days.map { day ->
+            val perDayRule = RecurrenceRule(
+                type = RecurrenceType.WEEKLY,
+                interval = detection.interval,
+                daysOfWeek = setOf(day),
+                hour = hour,
+                minute = minute,
+            )
+            ScheduledOccurrence(
+                scheduledAt = RecurrenceCalculator.nextOccurrence(perDayRule, now, timeZone),
+                recurrenceRule = if (detection.recurring) perDayRule else null,
+            )
+        }.sortedBy { it.scheduledAt }
+
+        val first = occurrences.first()
+        return TimeParseResult.Scheduled(
+            title = finalTitle,
+            scheduledAt = first.scheduledAt,
+            confidence = 0.9f,
+            recurrenceRule = first.recurrenceRule,
+            triggeredPlusFeatures = if (detection.recurring) setOf(PlusFeature.RECURRENCE) else emptySet(),
+            additionalOccurrences = occurrences.drop(1),
         )
     }
 
@@ -705,8 +752,6 @@ class TimeParser(
     }
 
     private fun detectRecurrence(input: String): Pair<RecurrenceRule, String>? {
-        detectWeekdaySet(input)?.let { return it }
-
         for ((pattern, ruleBuilder) in recurrencePatterns) {
             val match = pattern.find(input) ?: continue
             val rule = ruleBuilder(match)
@@ -716,34 +761,38 @@ class TimeParser(
         return null
     }
 
-    private fun detectWeekdaySet(input: String): Pair<RecurrenceRule, String>? {
-        // 1) 평일 / 주말 키워드 우선
-        WEEKDAY_KEYWORD_REGEX.find(input)?.let { m ->
-            val interval = if (m.groupValues[1].replace(" ", "").contains("격주")) 2 else 1
-            val isWeekend = m.groupValues[2] == "주말"
-            val rule = RecurrenceRule(
-                type = RecurrenceType.WEEKLY,
-                interval = interval,
-                daysOfWeek = if (isWeekend) WEEKEND_DAYS else WEEKDAY_DAYS,
-                hour = if (isWeekend) 10 else 9,
-                minute = 0,
-            )
-            return rule to input.removeRange(m.range).trim().replace(Regex("\\s+"), " ")
-        }
+    private data class WeekdaySetDetection(
+        val days: Set<DayOfWeek>,
+        val recurring: Boolean,   // 매주/격주/매/마다 마커가 있으면 true
+        val interval: Int,        // 1 또는 2(격주)
+        val remaining: String,
+    )
 
-        // 2) 구분자로 나열된 요일 목록
+    private fun detectWeekdaySet(input: String): WeekdaySetDetection? {
+        // 평일 / 주말 키워드
+        WEEKDAY_KEYWORD_REGEX.find(input)?.let { m ->
+            val prefix = m.groupValues[1].replace(" ", "")
+            val recurring = prefix.isNotEmpty() || m.groupValues[3].isNotEmpty()
+            val interval = if (prefix.contains("격주")) 2 else 1
+            val isWeekend = m.groupValues[2] == "주말"
+            return WeekdaySetDetection(
+                days = if (isWeekend) WEEKEND_DAYS else WEEKDAY_DAYS,
+                recurring = recurring,
+                interval = interval,
+                remaining = input.removeRange(m.range).trim().replace(Regex("\\s+"), " "),
+            )
+        }
+        // 구분자 나열 목록
         WEEKDAY_LIST_REGEX.find(input)?.let { m ->
             val days = extractDaysFromListSpan(m.groupValues[2])
             if (days.size < 2) return@let
-            val interval = if (m.groupValues[1].replace(" ", "").contains("격주")) 2 else 1
-            val rule = RecurrenceRule(
-                type = RecurrenceType.WEEKLY,
-                interval = interval,
-                daysOfWeek = days,
-                hour = DEFAULT_RECUR_HOUR,
-                minute = 0,
+            val prefix = m.groupValues[1].replace(" ", "")
+            return WeekdaySetDetection(
+                days = days,
+                recurring = prefix.isNotEmpty(),
+                interval = if (prefix.contains("격주")) 2 else 1,
+                remaining = input.removeRange(m.range).trim().replace(Regex("\\s+"), " "),
             )
-            return rule to input.removeRange(m.range).trim().replace(Regex("\\s+"), " ")
         }
         return null
     }
