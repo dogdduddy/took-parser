@@ -169,7 +169,7 @@ class PlusFeatureBlockingTest {
     }
 
     @Test
-    fun `무료 유저 퇴근하고 마트 — Scheduled 바로 등록, 트리거 없음`() {
+    fun `무료 유저 퇴근하고 마트 — Scheduled 바로 등록 트리거 없음`() {
         val resolver = LifeSegmentResolver(defaultSchedule(), isPremium = false,
             nowProvider = ::fixedNow)
         val result = TimeParser(::fixedNow).parse("퇴근하고 마트", resolver)
@@ -182,7 +182,7 @@ class PlusFeatureBlockingTest {
     }
 
     @Test
-    fun `무료 유저 출근하고 회의 — Scheduled 바로 등록, 트리거 없음`() {
+    fun `무료 유저 출근하고 회의 — Scheduled 바로 등록 트리거 없음`() {
         val resolver = LifeSegmentResolver(defaultSchedule(), isPremium = false,
             nowProvider = ::fixedNow)
         val result = TimeParser(::fixedNow).parse("출근하고 회의", resolver)
@@ -204,7 +204,7 @@ class PlusFeatureBlockingTest {
     }
 
     @Test
-    fun `무료 유저 내일 3시 치과 — Scheduled 바로 등록, 트리거 없음`() {
+    fun `무료 유저 내일 3시 치과 — Scheduled 바로 등록 트리거 없음`() {
         val resolver = LifeSegmentResolver(defaultSchedule(), isPremium = false,
             nowProvider = ::fixedNow)
         val result = TimeParser(::fixedNow).parse("내일 3시 치과", resolver)
